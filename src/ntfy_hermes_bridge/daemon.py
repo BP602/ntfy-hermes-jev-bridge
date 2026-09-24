@@ -651,7 +651,7 @@ class App:
         return True
 
 
-def run(config_path: Path) -> int:
+def run(config_path: Path | None) -> int:
     config = load_config(config_path)
     setup_logging(config.bridge.log_level, config.bridge.log_format)
 

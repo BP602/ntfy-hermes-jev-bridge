@@ -399,25 +399,35 @@ def load_env_file(path: Path) -> None:
         os.environ.setdefault(key.strip(), value)
 
 
-def load_config(path: str | Path) -> Config:
-    path = Path(path)
-    try:
-        data = tomllib.loads(path.read_text())
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise ConfigError(f"cannot read {path}: {exc}") from exc
+def load_config(path: str | Path | None) -> Config:
+    if path is None:
+        source = "NTFY_BRIDGE_CONFIG_JSON"
+        try:
+            data = json.loads(os.environ[source])
+        except (KeyError, json.JSONDecodeError) as exc:
+            raise ConfigError(f"invalid {source}: {exc}") from exc
+        base_dir = Path.cwd()
+    else:
+        path = Path(path)
+        source = str(path)
+        base_dir = path.parent
+        try:
+            data = tomllib.loads(path.read_text())
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            raise ConfigError(f"cannot read {path}: {exc}") from exc
     try:
         config = Config.model_validate(data)
     except ValidationError as exc:
-        raise ConfigError(f"invalid config {path}:\n{exc}") from exc
+        raise ConfigError(f"invalid config {source}:\n{exc}") from exc
     if config.bridge.env_file:
         env_path = Path(config.bridge.env_file)
         if not env_path.is_absolute():
-            env_path = path.parent / env_path
+            env_path = base_dir / env_path
         load_env_file(env_path)
     if config.network.ca_file:
         ca_path = Path(config.network.ca_file)
         if not ca_path.is_absolute():
-            ca_path = path.parent / ca_path
+            ca_path = base_dir / ca_path
             config = config.model_copy(update={"network": config.network.model_copy(update={"ca_file": str(ca_path)})})
         try:
             tls_context(config.network)

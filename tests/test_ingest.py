@@ -1,8 +1,10 @@
+import json
 import sqlite3
 
 import httpx
 import pytest
 
+from ntfy_hermes_bridge.cli import main as cli_main
 from ntfy_hermes_bridge.config import load_config
 from ntfy_hermes_bridge.daemon import App
 
@@ -157,3 +159,30 @@ async def test_outbound_requests_to_unlisted_hosts_are_refused(make_config):
     with pytest.raises(httpx.TransportError, match="not allowed"):
         await app.http.get("http://example.com/")
     await app.close()
+
+
+def test_inline_environment_config_runs_without_file_and_explicit_file_wins(tmp_path, monkeypatch, capsys):
+    inline = {
+        "ntfy": {"base_url": "http://ntfy.lan", "topics": [{"name": "alerts"}]},
+        "policy": {"version": "inline"},
+    }
+    monkeypatch.setenv("NTFY_BRIDGE_CONFIG_JSON", json.dumps(inline))
+    monkeypatch.setenv("NTFY_BRIDGE_CONFIG", str(tmp_path / "not-mounted.toml"))
+    assert cli_main(["check-config"]) == 0
+    assert "policy=inline" in capsys.readouterr().out
+
+    file = tmp_path / "config.toml"
+    file.write_text(
+        '[ntfy]\nbase_url = "http://ntfy.lan"\ntopics = [{ name = "alerts" }]\n[policy]\nversion = "file"\n'
+    )
+    assert cli_main(["-c", str(file), "check-config"]) == 0
+    assert "policy=file" in capsys.readouterr().out
+
+
+def test_inline_environment_config_uses_normal_validation(monkeypatch, capsys):
+    monkeypatch.setenv(
+        "NTFY_BRIDGE_CONFIG_JSON",
+        json.dumps({"ntfy": {"base_url": "http://ntfy.lan", "topics": []}, "policy": {"version": "invalid"}}),
+    )
+    assert cli_main(["check-config"]) == 1
+    assert "invalid config NTFY_BRIDGE_CONFIG_JSON" in capsys.readouterr().err

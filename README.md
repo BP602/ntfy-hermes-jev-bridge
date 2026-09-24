@@ -48,6 +48,14 @@ podman run --rm --name ntfy-bridge \
   ghcr.io/bp602/ntfy-hermes-jev-bridge:latest
 ```
 
+For a TrueNAS Custom App without a config mount, set the environment variable `NTFY_BRIDGE_CONFIG_JSON` to a single-line JSON configuration. For example, with your own ntfy topic and reachable URL:
+
+```json
+{"bridge":{"mode":"shadow","database":"bridge.db"},"ntfy":{"base_url":"http://truenas.lan:30184","topics":[{"name":"YOUR_TOPIC"}]},"policy":{"version":"2026-09-24.1"}}
+```
+
+This uses the same validation as `config.toml` and takes precedence over the image's `NTFY_BRIDGE_CONFIG` default; an explicit `-c` still selects a file. Keep API keys and the Hermes signing secret in separate environment variables, **not** in the JSON. To classify with Jev, set `typesafe.enabled` and `typesafe.accept_cloud_data_boundary` to `true` explicitly; `shadow` mode does not deliver notifications. Mount persistent writable storage at `/data` for UID 10001. Environment changes require an app restart; file-based policy config supports hot reload.
+
 The process must be able to read the mounted config and CA file and write `/data` as UID 10001 (rootless Podman may require `:U` or a matching host UID). Container DNS/network access to ntfy, Hermes and TypeSafe must match your configured endpoints. The container health check calls `127.0.0.1:9464/healthz` inside the container. Logs go to stderr: `bridge.log_format = "auto"` selects JSON lines without a TTY and readable `key=value` text in a terminal; force `"json"` or `"text"` as needed. Log records include the event/topic/route or retry context without raw notification bodies.
 
 ## Releases

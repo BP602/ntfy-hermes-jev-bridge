@@ -385,9 +385,7 @@ def cmd_digest_flush(config: Config, args) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ntfy-bridge", description=__doc__)
-    parser.add_argument(
-        "-c", "--config", default=os.environ.get("NTFY_BRIDGE_CONFIG", "config.toml"), help="config TOML path"
-    )
+    parser.add_argument("-c", "--config", help="config TOML path (overrides NTFY_BRIDGE_CONFIG_JSON)")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("run", help="run the bridge")
     sub.add_parser("check-config", help="validate configuration and secrets")
@@ -437,12 +435,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.config is not None:
+        config_path = Path(args.config)
+    elif "NTFY_BRIDGE_CONFIG_JSON" in os.environ:
+        config_path = None
+    else:
+        config_path = Path(os.environ.get("NTFY_BRIDGE_CONFIG", "config.toml"))
     try:
         if args.command == "run":
             from .daemon import run
 
-            return run(Path(args.config))
-        config = load_config(args.config)
+            return run(config_path)
+        config = load_config(config_path)
         match (
             args.command,
             getattr(args, "events_command", None)
