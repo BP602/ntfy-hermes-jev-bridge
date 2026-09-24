@@ -46,6 +46,32 @@ async def test_reconnect_replays_since_cursor_and_persists_once(make_config):
     await app.close()
 
 
+async def test_truncated_replay_alert_is_deduplicated_until_a_clean_replay(make_config):
+    truncated = iter((True, True, False, True))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        headers = {"X-Messages-Truncated": "1"} if next(truncated) else {}
+        return httpx.Response(200, headers=headers, content=b"")
+
+    app = App(make_config(), transport=httpx.MockTransport(handler))
+    topic = app.config.ntfy.topics[0]
+
+    def alert_count() -> int:
+        return app.store.conn.execute(
+            "SELECT COUNT(*) AS n FROM events WHERE event_id LIKE 'bridge:replay_truncated:%'"
+        ).fetchone()["n"]
+
+    await app.stream_once(topic)
+    await app.stream_once(topic)
+    assert alert_count() == 1
+
+    await app.stream_once(topic)
+    await app.stream_once(topic)
+    assert alert_count() == 2
+    assert app.metrics.value("health_alerts_total", kind="replay_truncated") == 2
+    await app.close()
+
+
 async def test_cursor_does_not_advance_when_persistence_fails(make_config):
     ntfy = NtfyStream([ntfy_line("M1"), ntfy_line("M2")])
     app = App(make_config(), transport=httpx.MockTransport(ntfy.handler))
@@ -87,16 +113,12 @@ async def test_invalid_timestamps_fall_back_to_received_time_without_stopping_st
     assert [row["message_id"] for row in rows] == ["M1", "M2", "M3", "M4", "M5"]
     assert [row["raw_json"] for row in rows] == lines
     assert all(row["occurred_at"] == row["received_at"] for row in rows)
-    cursor = app.store.conn.execute(
-        "SELECT message_id, message_time FROM cursors WHERE topic = 'alerts'"
-    ).fetchone()
+    cursor = app.store.conn.execute("SELECT message_id, message_time FROM cursors WHERE topic = 'alerts'").fetchone()
     assert (cursor["message_id"], cursor["message_time"]) == ("M5", 0)
     await app.close()
 
 
-async def test_hot_reload_rejects_promotion_without_resolved_hermes_secret(
-    tmp_path, services, monkeypatch, caplog
-):
+async def test_hot_reload_rejects_promotion_without_resolved_hermes_secret(tmp_path, services, monkeypatch, caplog):
     path = tmp_path / "config.toml"
 
     def config_text(mode: str, version: str) -> str:

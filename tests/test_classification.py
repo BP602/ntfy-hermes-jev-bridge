@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -129,6 +130,107 @@ async def test_repeat_within_cooldown_goes_to_digest(make_config, services):
     assert second.event.repeat_bucket == "repeated"
     assert second.effective == Route.DIGEST
     assert any("cooldown" in r for r in second.reasons)
+    await app.close()
+
+
+@pytest.mark.parametrize(
+    ("messages", "expected"),
+    [
+        (["same uncommitted event"] * 3, ["first", "repeated", "repeated"]),
+        (["down", "up", "down", "up"], ["first", "first", "repeated", "flapping"]),
+    ],
+    ids=["duplicates", "flapping"],
+)
+async def test_concurrent_repeat_buckets_reach_jev(make_config, services, monkeypatch, messages, expected):
+    app = App(make_config(bridge__mode="full"), transport=services.transport())
+    for index, message in enumerate(messages):
+        app.ingest_line("alerts", ntfy_line(f"M{index}", message, title="jellyfin"))
+    rows = app.store.claim_received(len(messages))
+
+    original_classify = app.pipeline.jev.classify
+    states = []
+    all_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_classify(state, settings):
+        states.append(state)
+        if len(states) == len(rows):
+            all_started.set()
+        await release.wait()
+        return await original_classify(state, settings)
+
+    monkeypatch.setattr(app.pipeline.jev, "classify", blocked_classify)
+    tasks = [asyncio.create_task(app.pipeline.process(row)) for row in rows]
+    try:
+        async with asyncio.timeout(1):
+            await all_started.wait()
+        assert [state["repeat_bucket"] for state in states] == expected
+    finally:
+        release.set()
+        decisions = await asyncio.gather(*tasks)
+
+    assert [decision.event.repeat_bucket for decision in decisions] == expected
+    assert [request["state"]["repeat_bucket"] for request in services.jev_requests] == expected
+    await app.close()
+
+
+async def test_flapping_orders_committed_and_inflight_events_by_arrival(make_config, services, monkeypatch):
+    app = App(make_config(bridge__mode="full"), transport=services.transport())
+    original_classify = app.pipeline.jev.classify
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def classify(state, settings):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            await release.wait()
+        return await original_classify(state, settings)
+
+    monkeypatch.setattr(app.pipeline.jev, "classify", classify)
+    app.ingest_line("alerts", ntfy_line("M0", "down", title="jellyfin"))
+    [first] = app.store.claim_received(1)
+    pending = asyncio.create_task(app.pipeline.process(first))
+    try:
+        async with asyncio.timeout(1):
+            await started.wait()
+        for mid, message in (("M1", "up"), ("M2", "down")):
+            app.ingest_line("alerts", ntfy_line(mid, message, title="jellyfin"))
+            [row] = app.store.claim_received(1)
+            await app.pipeline.process(row)
+        app.ingest_line("alerts", ntfy_line("M3", "up", title="jellyfin"))
+        [row] = app.store.claim_received(1)
+        decision = await app.pipeline.process(row)
+        assert decision.event.repeat_bucket == "flapping"
+        assert services.jev_requests[-1]["state"]["repeat_bucket"] == "flapping"
+    finally:
+        release.set()
+        await pending
+        await app.close()
+
+
+async def test_failed_process_does_not_leave_fingerprint_in_flight(make_config, services, monkeypatch):
+    app = App(make_config(bridge__mode="full"), transport=services.transport())
+    original_classify = app.pipeline.jev.classify
+
+    async def fail_classify(state, settings):
+        raise RuntimeError("classifier crashed")
+
+    monkeypatch.setattr(app.pipeline.jev, "classify", fail_classify)
+    app.ingest_line("alerts", ntfy_line("M1", "retryable after process failure"))
+    [failed] = app.store.claim_received(1)
+    with pytest.raises(RuntimeError, match="classifier crashed"):
+        await app.pipeline.process(failed)
+
+    monkeypatch.setattr(app.pipeline.jev, "classify", original_classify)
+    app.ingest_line("alerts", ntfy_line("M2", "retryable after process failure"))
+    [fresh] = app.store.claim_received(1)
+    decision = await app.pipeline.process(fresh)
+
+    assert services.jev_requests[-1]["state"]["repeat_bucket"] == "first"
+    assert decision.event.repeat_bucket == "first"
     await app.close()
 
 

@@ -107,11 +107,14 @@ def parse_response(payload: object) -> tuple[str, JevAnswers, int, int]:
     if choice not in CATEGORIES:
         raise JevError(f"invalid response: unknown category {choice!r}", retryable=False)
     probabilities = category.get("probabilities")
-    if not isinstance(probabilities, dict) or not set(probabilities) <= set(CATEGORIES):
+    if not isinstance(probabilities, dict) or set(probabilities) != set(CATEGORIES):
         raise JevError("invalid response: category probabilities do not match options", retryable=False)
     probabilities = {k: _probability(v, f"category.probabilities.{k}") for k, v in probabilities.items()}
     if abs(sum(probabilities.values()) - 1.0) > 0.02:
         raise JevError("invalid response: category probabilities do not sum to 1", retryable=False)
+    # Equal top probabilities are valid: the API may break a tie by returning either option.
+    if probabilities[choice] < max(probabilities.values()):
+        raise JevError("invalid response: category choice does not have highest probability", retryable=False)
     confidence = _probability(category.get("confidence"), "category.confidence")
 
     noul = {}
@@ -164,6 +167,11 @@ class JevClient:
                     except ValueError:
                         raise JevError("invalid response: body is not JSON", retryable=False) from None
                     model, answers, input_tokens, output_tokens = parse_response(payload)
+                    if model != settings.model and not settings.allow_model_alias:
+                        raise JevError(
+                            f"invalid response: model {model!r} does not match requested model {settings.model!r}",
+                            retryable=False,
+                        )
                     latency = int((time.monotonic() - started) * 1000)
                     return JevResult(model, answers, input_tokens, output_tokens, latency)
                 status = response.status_code

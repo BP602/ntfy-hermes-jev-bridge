@@ -112,10 +112,13 @@ class Pipeline:
         self.metrics = metrics
         self.jev = jev
         self.ctx = ctx
+        self._inflight: dict[str, CanonicalEvent] = {}
 
     # ---- normalization ----------------------------------------------------------------------
 
-    def canonical(self, row: sqlite3.Row, ctx: Context) -> CanonicalEvent:
+    def canonical(
+        self, row: sqlite3.Row, ctx: Context, *, in_flight: tuple[CanonicalEvent, ...] = ()
+    ) -> CanonicalEvent:
         """Rebuild the canonical event from the stored raw message, with history as of its arrival."""
         policy = ctx.config.policy
         topic = (
@@ -139,26 +142,46 @@ class Pipeline:
             self.metrics.inc("redactions_total", n, kind=kind)
         event = replace(event, fingerprint=fingerprint(event, policy.fingerprint_fields))
         return replace(
-            event, repeat_bucket=self._repeat_bucket(event, policy), recency_bucket=self._recency(event, policy)
+            event,
+            repeat_bucket=self._repeat_bucket(event, policy, in_flight),
+            recency_bucket=self._recency(event, policy),
         )
 
-    def _repeat_bucket(self, event: CanonicalEvent, policy) -> str:
+    def _repeat_bucket(self, event: CanonicalEvent, policy, in_flight: tuple[CanonicalEvent, ...] = ()) -> str:
         before = event.received_at
+        earlier = tuple(
+            candidate
+            for candidate in in_flight
+            if candidate.event_id != event.event_id and candidate.received_at < before
+        )
         if policy.flap_window_seconds:
+            since = _shift(before, policy.flap_window_seconds)
             history = self.store.entity_fingerprints(
                 event.source,
                 event.source_entity,
-                since=_shift(before, policy.flap_window_seconds),
+                since=since,
                 before=before,
                 exclude=event.event_id,
             )
-            sequence = [*history, event.fingerprint]
+            history.extend(
+                (candidate.received_at, candidate.event_id, candidate.fingerprint)
+                for candidate in earlier
+                if candidate.source == event.source
+                and candidate.source_entity == event.source_entity
+                and candidate.received_at >= since
+            )
+            history.sort()
+            sequence = [*(item[2] for item in history), event.fingerprint]
             if _oscillations(sequence) >= policy.flap_min_transitions - 1:
                 return "flapping"
-        if policy.dedupe_window_seconds and self.store.fingerprint_seen(
-            event.fingerprint, since=_shift(before, policy.dedupe_window_seconds), before=before, exclude=event.event_id
-        ):
-            return "repeated"
+        if policy.dedupe_window_seconds:
+            since = _shift(before, policy.dedupe_window_seconds)
+            if self.store.fingerprint_seen(
+                event.fingerprint, since=since, before=before, exclude=event.event_id
+            ) or any(
+                candidate.fingerprint == event.fingerprint and candidate.received_at >= since for candidate in earlier
+            ):
+                return "repeated"
         return "first"
 
     @staticmethod
@@ -331,15 +354,23 @@ class Pipeline:
     async def process(self, row: sqlite3.Row) -> Decision | None:
         ctx = self.ctx
         try:
-            event = self.canonical(row, ctx)
+            event = self.canonical(row, ctx, in_flight=tuple(self._inflight.values()))
         except ValueError as exc:  # MalformedMessage and JSON errors
             self.store.mark_quarantined(row["event_id"], f"normalization failed: {exc}")
             self.metrics.inc("events_quarantined_total")
             log.warning("event quarantined", extra={"event_id": row["event_id"], "error": str(exc)})
             return None
-        decision = await self.decide(event, ctx, synthetic=bool(row["synthetic"]))
-        self.commit(decision, ctx)
-        return decision
+
+        tracked = not bool(row["synthetic"])
+        if tracked:
+            self._inflight[event.event_id] = event
+        try:
+            decision = await self.decide(event, ctx, synthetic=bool(row["synthetic"]))
+            self.commit(decision, ctx)
+            return decision
+        finally:
+            if tracked:
+                self._inflight.pop(event.event_id, None)
 
     # ---- replay / evaluation ----------------------------------------------------------------
 

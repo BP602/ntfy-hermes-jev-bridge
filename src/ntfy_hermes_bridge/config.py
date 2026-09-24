@@ -139,6 +139,13 @@ class DigestSettings(_Model):
         return tuple(sorted(set(value)))
 
 
+def _validate_categories(value: tuple[str, ...]) -> tuple[str, ...]:
+    unknown = set(value) - set(CATEGORIES)
+    if unknown:
+        raise ValueError(f"unknown categories: {sorted(unknown)}")
+    return value
+
+
 class Thresholds(_Model):
     notify_harm: Prob = 0.80
     notify_category_confidence: Prob = 0.70
@@ -153,10 +160,7 @@ class Thresholds(_Model):
     @field_validator("notify_categories")
     @classmethod
     def _categories(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        unknown = set(value) - set(CATEGORIES)
-        if unknown:
-            raise ValueError(f"unknown categories: {sorted(unknown)}")
-        return value
+        return _validate_categories(value)
 
 
 class ThresholdOverrides(_Model):
@@ -169,6 +173,11 @@ class ThresholdOverrides(_Model):
     drop_max_relevance: Prob | None = None
     digest_value: Prob | None = None
     digest_relevance: Prob | None = None
+
+    @field_validator("notify_categories")
+    @classmethod
+    def _categories(cls, value: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        return None if value is None else _validate_categories(value)
 
 
 class UserPolicy(_Model):

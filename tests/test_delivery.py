@@ -1,9 +1,12 @@
+import asyncio
 import hashlib
 import hmac
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
+import ntfy_hermes_bridge.daemon as daemon_module
 from ntfy_hermes_bridge.daemon import App
 from ntfy_hermes_bridge.models import Route
 
@@ -98,4 +101,182 @@ async def test_health_alert_is_routed_as_always_notify_once_per_outage(make_conf
     app.check_alert("delivery_outage", False, "")
     app.check_alert("delivery_outage", True, "again")
     assert len(app.store.claim_received(10)) == 1
+    await app.close()
+
+
+async def test_outbox_loop_recovers_and_isolates_sibling_deliveries(make_config, services, monkeypatch):
+    app = App(make_config(), transport=services.transport())
+    due_calls = 0
+    attempted = []
+    sleeps = []
+
+    def due_outbox(*_args):
+        nonlocal due_calls
+        due_calls += 1
+        if due_calls == 1:
+            raise RuntimeError("temporary database failure")
+        if due_calls == 2:
+            return [{"id": 1}, {"id": 2}]
+        raise asyncio.CancelledError
+
+    async def deliver(row):
+        attempted.append(row["id"])
+        if row["id"] == 1:
+            raise RuntimeError("temporary delivery failure")
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(app.store, "due_outbox", due_outbox)
+    monkeypatch.setattr(app, "deliver", deliver)
+    monkeypatch.setattr(daemon_module.asyncio, "sleep", sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await app.outbox_loop()
+
+    assert attempted == [1, 2]
+    assert sleeps == [daemon_module.LOOP_RETRY_SECONDS, daemon_module.LOOP_RETRY_SECONDS]
+    await app.close()
+
+
+async def test_digest_loop_recovers_without_swallowing_cancellation(make_config, services, monkeypatch):
+    app = App(make_config(), transport=services.transport())
+    calls = 0
+
+    def run_digest(*_args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary database failure")
+        if calls == 2:
+            return 2
+        raise asyncio.CancelledError
+
+    async def sleep(_delay):
+        pass
+
+    monkeypatch.setattr(daemon_module, "run_due_digest", run_digest)
+    monkeypatch.setattr(daemon_module.asyncio, "sleep", sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await app.digest_loop()
+
+    assert calls == 3
+    assert app.outbox_wake.is_set()
+    assert app.metrics.value("digests_total") == 2
+    await app.close()
+
+
+async def test_maintenance_loop_recovers_without_swallowing_cancellation(make_config, services, monkeypatch):
+    app = App(make_config(), transport=services.transport())
+    refresh_calls = 0
+    prune_calls = []
+
+    async def refresh_guardrail():
+        nonlocal refresh_calls
+        refresh_calls += 1
+        if refresh_calls == 1:
+            raise RuntimeError("temporary guardrail failure")
+        if refresh_calls == 3:
+            raise asyncio.CancelledError
+
+    async def sleep(_delay):
+        pass
+
+    monkeypatch.setattr(app, "refresh_guardrail", refresh_guardrail)
+    monkeypatch.setattr(app.store, "prune", lambda days: prune_calls.append(days) or 0)
+    monkeypatch.setattr(daemon_module.asyncio, "sleep", sleep)
+    monkeypatch.setattr(daemon_module, "PRUNE_INTERVAL_SECONDS", -1)
+
+    with pytest.raises(asyncio.CancelledError):
+        await app.maintenance_loop()
+
+    assert refresh_calls == 3
+    assert prune_calls == [app.config.retention.days]
+    await app.close()
+
+
+async def test_quarantine_growth_alerts_only_for_new_growth(make_config, services):
+    config = make_config()
+    app = App(config, transport=services.transport())
+    app.ingest_line("alerts", "historical invalid input")
+    await app.close()
+
+    app = App(config, transport=services.transport())
+    app._check_health_alerts(app.health())
+    assert (
+        app.store.conn.execute(
+            "SELECT COUNT(*) AS n FROM events WHERE event_id LIKE 'bridge:quarantine_growth:%'"
+        ).fetchone()["n"]
+        == 0
+    )
+
+    app.ingest_line("alerts", "new invalid input")
+    app._check_health_alerts(app.health())
+    app._check_health_alerts(app.health())
+    assert (
+        app.store.conn.execute(
+            "SELECT COUNT(*) AS n FROM events WHERE event_id LIKE 'bridge:quarantine_growth:%'"
+        ).fetchone()["n"]
+        == 1
+    )
+
+    app.ingest_line("alerts", "another invalid input")
+    app._check_health_alerts(app.health())
+    assert (
+        app.store.conn.execute(
+            "SELECT COUNT(*) AS n FROM events WHERE event_id LIKE 'bridge:quarantine_growth:%'"
+        ).fetchone()["n"]
+        == 2
+    )
+    await app.close()
+
+
+async def test_stalled_nonterminal_event_degrades_health_and_alerts(make_config, services):
+    app = App(make_config(), transport=services.transport())
+    app.ingest_line("alerts", ntfy_line("M-stalled"))
+    assert app.health()["status"] == "ok"
+
+    old = (datetime.now(UTC) - timedelta(days=2)).isoformat(timespec="microseconds")
+    app.store.conn.execute(
+        "UPDATE events SET received_at = ?, occurred_at = ? WHERE event_id = ?",
+        (old, old, "ntfy:alerts:M-stalled"),
+    )
+    snapshot = app.health()
+    assert snapshot["events_stalled"]
+    assert snapshot["status"] == "degraded"
+
+    app._check_health_alerts(snapshot)
+    app._check_health_alerts(app.health())
+    rows = app.store.conn.execute(
+        "SELECT raw_json FROM events WHERE event_id LIKE 'bridge:events_stalled:%'"
+    ).fetchall()
+    assert len(rows) == 1
+    await app.close()
+
+
+async def test_alert_retries_after_event_persistence_failure(make_config, services, monkeypatch):
+    app = App(make_config(), transport=services.transport())
+    original_ingest = app.store.ingest
+    attempts = 0
+
+    def flaky_ingest(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("database temporarily unavailable")
+        return original_ingest(**kwargs)
+
+    monkeypatch.setattr(app.store, "ingest", flaky_ingest)
+    with pytest.raises(OSError):
+        app.check_alert("replay_truncated", True, "replay lost", key="replay_truncated:alerts")
+    app.check_alert("replay_truncated", True, "replay lost", key="replay_truncated:alerts")
+    assert attempts == 2
+    assert (
+        app.store.conn.execute(
+            "SELECT COUNT(*) FROM events WHERE event_id LIKE 'bridge:replay_truncated:%'"
+        ).fetchone()[0]
+        == 1
+    )
+    assert app.metrics.value("health_alerts_total", kind="replay_truncated") == 1
     await app.close()

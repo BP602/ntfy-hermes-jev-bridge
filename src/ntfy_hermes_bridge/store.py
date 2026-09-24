@@ -140,10 +140,25 @@ class AmbiguousRef(LookupError):
     pass
 
 
+def _secure_database_files(path: str) -> None:
+    """Secure the database before SQLite creates WAL/SHM files from its mode."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+    for suffix in ("-wal", "-shm"):
+        try:
+            os.chmod(path + suffix, 0o600)
+        except FileNotFoundError:
+            pass
+
+
 class Store:
     def __init__(self, path: str):
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
+            _secure_database_files(path)
         self.conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -152,7 +167,7 @@ class Store:
         self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.executescript(SCHEMA)
         if path != ":memory:":
-            os.chmod(path, 0o600)
+            _secure_database_files(path)
 
     def close(self) -> None:
         self.conn.close()
@@ -290,14 +305,16 @@ class Store:
         ).fetchone()
         return row is not None
 
-    def entity_fingerprints(self, source: str, entity: str, *, since: str, before: str, exclude: str) -> list[str]:
+    def entity_fingerprints(
+        self, source: str, entity: str, *, since: str, before: str, exclude: str
+    ) -> list[tuple[str, str, str]]:
         rows = self.conn.execute(
-            """SELECT fingerprint FROM events WHERE source = ? AND source_entity = ? AND received_at >= ?
+            """SELECT received_at, event_id, fingerprint FROM events WHERE source = ? AND source_entity = ? AND received_at >= ?
                    AND received_at < ? AND event_id != ? AND synthetic = 0 AND fingerprint IS NOT NULL
                ORDER BY received_at, event_id""",
             (source, entity, since, before, exclude),
         ).fetchall()
-        return [r["fingerprint"] for r in rows]
+        return [(r["received_at"], r["event_id"], r["fingerprint"]) for r in rows]
 
     def recent_hermes_event(self, fingerprint: str, *, since: str, before: str, exclude: str) -> sqlite3.Row | None:
         return self.conn.execute(
@@ -575,9 +592,20 @@ class Store:
         undecided = c.execute(
             "SELECT COUNT(*) AS n FROM events WHERE status IN (?, ?)", (RECEIVED, PROCESSING)
         ).fetchone()["n"]
-        age = (datetime.now(UTC) - datetime.fromisoformat(oldest)).total_seconds() if oldest else 0.0
+        marks = ",".join("?" * len(TERMINAL_STATUSES))
+        nonterminal = c.execute(
+            f"SELECT COUNT(*) AS n, MIN(received_at) AS oldest FROM events WHERE status NOT IN ({marks})",
+            TERMINAL_STATUSES,
+        ).fetchone()
+        now = datetime.now(UTC)
+        age = (now - datetime.fromisoformat(oldest)).total_seconds() if oldest else 0.0
+        nonterminal_age = (
+            (now - datetime.fromisoformat(nonterminal["oldest"])).total_seconds() if nonterminal["oldest"] else 0.0
+        )
         return {
             "events_undecided": undecided,
+            "events_nonterminal": nonterminal["n"],
+            "events_oldest_nonterminal_seconds": nonterminal_age,
             "events_quarantined": c.execute("SELECT COUNT(*) AS n FROM events WHERE status = 'quarantined'").fetchone()[
                 "n"
             ],
