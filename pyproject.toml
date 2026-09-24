@@ -1,0 +1,34 @@
+[project]
+name = "ntfy-hermes-jev-bridge"
+version = "0.1.0"
+description = "Local-first ntfy -> TypeSafe Jev -> Hermes notification gate"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx[http2]>=0.27",
+    "pydantic>=2.7",
+]
+
+[project.scripts]
+ntfy-bridge = "ntfy_hermes_bridge.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ntfy_hermes_bridge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP"]
+ignore = ["E501"]

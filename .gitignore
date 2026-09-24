@@ -1,0 +1,12 @@
+.env
+*.db
+*.db-shm
+*.db-wal
+.venv/
+__pycache__/
+.pytest_cache/
+config.toml
+*.pem
+.omp/
+.ruff_cache/
+*-prd.md
