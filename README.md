@@ -33,7 +33,7 @@ Give ntfy a persistent cache (`cache-file`). Its default in-memory cache does no
 
 ## Container image
 
-Every branch push and PR targeting `main` runs tests and lint; no PR is needed to trigger CI. A successful push to `main` additionally publishes `ghcr.io/bp602/ntfy-hermes-jev-bridge:main` and an immutable `sha-<40-character-commit>` tag. Release commits also publish `v<version>` and `latest`. The image runs as UID 10001, writes SQLite under `/data`, and reads `/config/config.toml`; no local config, `.env`, or PEM is included in the image.
+Every branch push and PR targeting `main` runs tests and lint; no PR is needed to trigger CI. A successful push to `main` additionally publishes `ghcr.io/bp602/ntfy-hermes-jev-bridge:latest`, `:main`, and an immutable `sha-<40-character-commit>` tag. Release commits also publish `v<version>`. `latest` follows the newest successful `main` build, including unreleased commits. The image runs as UID 10001, writes SQLite under `/data`, and reads `/config/config.toml`; no local config, `.env`, or PEM is included in the image.
 
 ```sh
 mkdir -p bridge-data
@@ -45,7 +45,7 @@ podman run --rm --name ntfy-bridge \
   --env-file .env \
   -v "$PWD/config.toml:/config/config.toml:ro" \
   -v "$PWD/bridge-data:/data" \
-  ghcr.io/bp602/ntfy-hermes-jev-bridge:main
+  ghcr.io/bp602/ntfy-hermes-jev-bridge:latest
 ```
 
 The process must be able to read the mounted config and CA file and write `/data` as UID 10001 (rootless Podman may require `:U` or a matching host UID). Container DNS/network access to ntfy, Hermes and TypeSafe must match your configured endpoints. The container health check calls `127.0.0.1:9464/healthz` inside the container. Logs go to stderr: `bridge.log_format = "auto"` selects JSON lines without a TTY and readable `key=value` text in a terminal; force `"json"` or `"text"` as needed. Log records include the event/topic/route or retry context without raw notification bodies.

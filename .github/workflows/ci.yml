@@ -68,7 +68,7 @@ jobs:
             type=sha,format=long
             type=raw,value=main
             type=raw,value=v${{ needs.release.outputs.version }},enable=${{ needs.release.outputs.created == 'true' }}
-            type=raw,value=latest,enable=${{ needs.release.outputs.created == 'true' }}
+            type=raw,value=latest
       - uses: docker/build-push-action@v6
         with:
           context: .
