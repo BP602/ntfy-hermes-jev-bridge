@@ -328,7 +328,7 @@ class Pipeline:
                 critical=decision.rule is not None,
             )
         else:
-            # REVIEW also lands in the digest queue, so a Hermes [SILENT] verdict can never lose the event.
+            # REVIEW also lands in the digest queue, regardless of the webhook agent's response.
             status, digest = QUEUED, True
             outbox = OutboxInsert(
                 "review",
