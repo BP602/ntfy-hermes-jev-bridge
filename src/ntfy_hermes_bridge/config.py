@@ -40,6 +40,7 @@ class BridgeSettings(_Model):
     database: str = "bridge.db"
     env_file: str = ""
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    log_format: Literal["auto", "json", "text"] = "auto"  # auto: JSON unless stderr is a terminal
     timezone: str = "UTC"
     workers: int = Field(default=8, ge=1, le=64)
 

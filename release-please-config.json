@@ -1,0 +1,32 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "bootstrap-sha": "4cccd1c82f05ad5695d57e32ccada8f9676e5785",
+  "packages": {
+    ".": {
+      "release-type": "python",
+      "package-name": "ntfy-hermes-jev-bridge",
+      "include-component-in-tag": false,
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": false,
+      "changelog-sections": [
+        {"type": "feat", "section": "Features"},
+        {"type": "fix", "section": "Bug Fixes"},
+        {"type": "perf", "section": "Performance"},
+        {"type": "revert", "section": "Reverts"},
+        {"type": "docs", "section": "Documentation"},
+        {"type": "deps", "section": "Dependencies"},
+        {"type": "refactor", "section": "Refactoring", "hidden": true},
+        {"type": "test", "section": "Tests", "hidden": true},
+        {"type": "ci", "section": "CI", "hidden": true},
+        {"type": "chore", "section": "Miscellaneous", "hidden": true}
+      ],
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "uv.lock",
+          "jsonpath": "$.package[?(@.name=='ntfy-hermes-jev-bridge')].version"
+        }
+      ]
+    }
+  }
+}

@@ -3,6 +3,7 @@ import sqlite3
 import httpx
 import pytest
 
+from ntfy_hermes_bridge.config import load_config
 from ntfy_hermes_bridge.daemon import App
 
 from .conftest import ntfy_line
@@ -64,6 +65,68 @@ async def test_malformed_lines_are_quarantined_without_stopping_the_stream(make_
     await app.stream_once(app.config.ntfy.topics[0])
     assert app.store.counts()["quarantine_raw"] == 2
     assert app.store.get_event("ntfy:alerts:M1") is not None
+    await app.close()
+
+
+async def test_invalid_timestamps_fall_back_to_received_time_without_stopping_stream(make_config):
+    lines = [
+        '{"id":"M1","time":1e30,"event":"message","topic":"alerts","message":"far future"}',
+        '{"id":"M2","time":-1e30,"event":"message","topic":"alerts","message":"far past"}',
+        '{"id":"M3","time":NaN,"event":"message","topic":"alerts","message":"not a number"}',
+        '{"id":"M4","time":Infinity,"event":"message","topic":"alerts","message":"positive infinity"}',
+        '{"id":"M5","time":-Infinity,"event":"message","topic":"alerts","message":"negative infinity"}',
+    ]
+    ntfy = NtfyStream(lines)
+    app = App(make_config(), transport=httpx.MockTransport(ntfy.handler))
+
+    await app.stream_once(app.config.ntfy.topics[0])
+
+    rows = app.store.conn.execute(
+        "SELECT message_id, raw_json, occurred_at, received_at FROM events ORDER BY rowid"
+    ).fetchall()
+    assert [row["message_id"] for row in rows] == ["M1", "M2", "M3", "M4", "M5"]
+    assert [row["raw_json"] for row in rows] == lines
+    assert all(row["occurred_at"] == row["received_at"] for row in rows)
+    cursor = app.store.conn.execute(
+        "SELECT message_id, message_time FROM cursors WHERE topic = 'alerts'"
+    ).fetchone()
+    assert (cursor["message_id"], cursor["message_time"]) == ("M5", 0)
+    await app.close()
+
+
+async def test_hot_reload_rejects_promotion_without_resolved_hermes_secret(
+    tmp_path, services, monkeypatch, caplog
+):
+    path = tmp_path / "config.toml"
+
+    def config_text(mode: str, version: str) -> str:
+        return f"""
+[bridge]
+mode = "{mode}"
+database = "{tmp_path / "reload.db"}"
+[ntfy]
+base_url = "http://127.0.0.1:2586"
+topics = [{{ name = "alerts" }}]
+[health]
+listen = ""
+[policy]
+version = "{version}"
+"""
+
+    monkeypatch.delenv("HERMES_WEBHOOK_SECRET")
+    path.write_text(config_text("shadow", "v1"))
+    app = App(load_config(path), config_path=path, transport=services.transport())
+    active = app.config
+
+    path.write_text(config_text("guarded", "v2"))
+    app.config_mtime = 0
+    assert not await app.maybe_reload()
+    assert app.config is active
+    assert app.config.bridge.mode == "shadow"
+    assert app.config.policy.version == "v1"
+    [rejection] = [record for record in caplog.records if record.message == "config reload rejected: invalid"]
+    assert rejection.keeping_policy == "v1"
+    assert rejection.error == "mode 'guarded' requires $HERMES_WEBHOOK_SECRET for signed Hermes delivery"
     await app.close()
 
 

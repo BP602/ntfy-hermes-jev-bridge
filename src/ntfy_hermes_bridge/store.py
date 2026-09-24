@@ -491,6 +491,13 @@ class Store:
                     "UPDATE events SET status = 'dead_letter', updated_at = ? WHERE event_id = ? AND status = ?",
                     (now, row["event_id"], QUEUED),
                 )
+            elif row["kind"] == "digest":
+                conn.execute(
+                    f"""UPDATE events SET status = 'dead_letter', updated_at = ?
+                        WHERE status = '{QUEUED_DIGEST}'
+                          AND event_id IN (SELECT event_id FROM digest_items WHERE digest_id = ?)""",
+                    (now, row["digest_id"]),
+                )
 
     def list_outbox(self, *, status: str | None = None, limit: int = 50) -> list[sqlite3.Row]:
         if status:
@@ -507,11 +514,12 @@ class Store:
         now = now_iso()
         with self.tx() as conn:
             if ids is None:
-                rows = conn.execute("SELECT id, kind, event_id FROM outbox WHERE status = 'dead'").fetchall()
+                rows = conn.execute("SELECT id, kind, event_id, digest_id FROM outbox WHERE status = 'dead'").fetchall()
             else:
                 marks = ",".join("?" * len(ids))
                 rows = conn.execute(
-                    f"SELECT id, kind, event_id FROM outbox WHERE status = 'dead' AND id IN ({marks})", tuple(ids)
+                    f"SELECT id, kind, event_id, digest_id FROM outbox WHERE status = 'dead' AND id IN ({marks})",
+                    tuple(ids),
                 ).fetchall()
             for row in rows:
                 conn.execute(
@@ -522,6 +530,12 @@ class Store:
                     conn.execute(
                         "UPDATE events SET status = ?, updated_at = ? WHERE event_id = ? AND status = 'dead_letter'",
                         (QUEUED, now, row["event_id"]),
+                    )
+                elif row["kind"] == "digest":
+                    conn.execute(
+                        """UPDATE events SET status = ?, updated_at = ? WHERE status = 'dead_letter'
+                              AND event_id IN (SELECT event_id FROM digest_items WHERE digest_id = ?)""",
+                        (QUEUED_DIGEST, now, row["digest_id"]),
                     )
         return len(rows)
 
@@ -539,15 +553,19 @@ class Store:
     def digest_item_for(self, event_id: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM digest_items WHERE event_id = ?", (event_id,)).fetchone()
 
-    def commit_digest(self, parts: Sequence[tuple[OutboxInsert, Sequence[str]]]) -> None:
+    def commit_digest(self, parts: Sequence[tuple[OutboxInsert, Sequence[str]]]) -> int:
         now = now_iso()
+        inserted = 0
         with self.tx() as conn:
             for item, event_ids in parts:
-                self._enqueue(conn, item, event_id=None, now=now)
+                if not self._enqueue(conn, item, event_id=None, now=now):
+                    continue
                 conn.executemany(
                     "UPDATE digest_items SET digest_id = ? WHERE event_id = ? AND digest_id IS NULL",
                     [(item.digest_id, event_id) for event_id in event_ids],
                 )
+                inserted += 1
+        return inserted
 
     # ---- health / metrics -------------------------------------------------------------------
 
@@ -577,7 +595,15 @@ class Store:
         cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).isoformat(timespec="microseconds")
         marks = ",".join("?" * len(TERMINAL_STATUSES))
         with self.tx() as conn:
-            conn.execute("DELETE FROM outbox WHERE status != 'pending' AND updated_at < ?", (cutoff,))
+            conn.execute(
+                f"""DELETE FROM outbox WHERE status != 'pending' AND updated_at < ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM digest_items d JOIN events e ON e.event_id = d.event_id
+                          WHERE outbox.kind = 'digest' AND outbox.status = 'dead'
+                            AND d.digest_id = outbox.digest_id AND e.status NOT IN ({marks})
+                      )""",
+                (cutoff, *TERMINAL_STATUSES),
+            )
             conn.execute("DELETE FROM quarantine WHERE received_at < ?", (cutoff,))
             return conn.execute(
                 f"""DELETE FROM events WHERE status IN ({marks}) AND received_at < ?

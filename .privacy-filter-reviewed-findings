@@ -16,3 +16,6 @@ tests/test_redact_normalize.py	secret	b6036586133b6d0f
 tests/test_redact_normalize.py	secret	cda2543f7ac37815
 tests/test_redact_normalize.py	secret	e3480feeb563169b
 tests/test_redact_normalize.py	secret	f39dac6cbaba535e
+CHANGELOG.md	private_person	4b23c5040d02a920
+release-please-config.json	private_person	0117834bf60dcf97
+release-please-config.json	private_person	120fb9a92db61685

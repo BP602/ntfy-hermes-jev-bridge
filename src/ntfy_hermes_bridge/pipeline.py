@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from itertools import pairwise
 
-from . import __version__
+from . import BUILD
 from .config import Config, Thresholds, TopicSettings
 from .hermes import compose_payload, review_payload
 from .jev import JevAnswers, JevClient, JevError, JevResult, build_state
@@ -226,7 +226,7 @@ class Pipeline:
             result = await self.jev.classify(state, ctx.config.typesafe)
         except JevError as exc:
             self.metrics.inc("jev_requests_total", outcome="retryable_error" if exc.retryable else "error")
-            log.warning("jev classification failed: %s", exc)
+            log.warning("jev classification failed", extra={"error": str(exc), "retryable": exc.retryable})
             return None, str(exc)
         self.metrics.inc("jev_requests_total", outcome="ok")
         self.metrics.inc("jev_input_tokens_total", result.input_tokens)
@@ -264,7 +264,7 @@ class Pipeline:
         return {
             "created_at": now_iso(),
             "mode": decision.mode,
-            "bridge_version": __version__,
+            "bridge_version": BUILD,
             "policy_version": ctx.config.policy.version,
             "policy_hash": ctx.policy_hash,
             "question_set_version": QUESTION_SET_VERSION,
@@ -335,7 +335,7 @@ class Pipeline:
         except ValueError as exc:  # MalformedMessage and JSON errors
             self.store.mark_quarantined(row["event_id"], f"normalization failed: {exc}")
             self.metrics.inc("events_quarantined_total")
-            log.warning("quarantined %s: %s", row["event_id"], exc)
+            log.warning("event quarantined", extra={"event_id": row["event_id"], "error": str(exc)})
             return None
         decision = await self.decide(event, ctx, synthetic=bool(row["synthetic"]))
         self.commit(decision, ctx)

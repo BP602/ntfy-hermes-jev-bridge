@@ -96,3 +96,25 @@ async def test_candidate_policy_regressions_are_reported(make_config, services, 
     assert await asyncio.to_thread(main, ["-c", current, "eval", "--candidate", candidate]) == 2
     out = capsys.readouterr().out
     assert "regression CRITICAL: ntfy:alerts:M1 label NOTIFY_NOW · NOTIFY_NOW -> REVIEW" in out
+
+
+async def test_critical_safe_to_unsafe_demotion_is_a_regression_even_when_current_misses_label(
+    make_config, services, tmp_path, capsys
+):
+    services.jev_default = jev_answers(harm=0.4, digest=0.4, relevance=0.4, noise=0.3)
+    config = make_config(bridge__mode="full")
+    app = App(config, transport=services.transport())
+    [decision] = await run(app, ntfy_line("M1", "capacity forecast available"))
+    assert decision.proposed is Route.REVIEW
+    app.store.add_label("ntfy:alerts:M1", "NOTIFY_NOW", critical=True, note="")
+    await app.close()
+
+    current = write_config(tmp_path, config.bridge.database)
+    candidate_dir = tmp_path / "candidate"
+    candidate_dir.mkdir()
+    candidate = write_config(candidate_dir, config.bridge.database, **{"thresholds": "{ digest_value = 0.3 }"})
+
+    assert await asyncio.to_thread(main, ["-c", current, "eval", "--candidate", candidate]) == 2
+    out = capsys.readouterr().out
+    assert "candidate vs current: 0 fixed, 1 regressed" in out
+    assert "regression CRITICAL: ntfy:alerts:M1 label NOTIFY_NOW · REVIEW -> DIGEST" in out

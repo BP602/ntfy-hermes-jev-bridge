@@ -8,6 +8,7 @@ database = "bridge.db"
 env_file = ".env"               # KEY=VALUE secrets; must be chmod 600
 timezone = "America/New_York"
 log_level = "INFO"
+log_format = "auto"             # JSON when stderr is not a terminal; "json" or "text" to force
 workers = 8
 
 [ntfy]

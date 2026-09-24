@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 import pytest
 
 from ntfy_hermes_bridge.daemon import App
-from ntfy_hermes_bridge.digest import run_due_digest
+from ntfy_hermes_bridge.digest import enqueue_digest, run_due_digest
 from ntfy_hermes_bridge.hermes import encode
 
 from .conftest import jev_answers, ntfy_line
@@ -61,6 +61,101 @@ async def test_large_digest_is_split_under_body_limit(make_config, services):
     assert all(len(encode(p)) <= 16_384 for p in parts)
     assert {p["parts"] for p in parts} == {len(parts)}
     assert sum(p["event_count"] for p in parts) == 120
+    await app.close()
+
+
+async def test_forced_digests_in_same_second_have_distinct_deliveries(make_config, services):
+    services.jev_default = jev_answers(digest=0.9)
+    app = App(make_config(bridge__mode="full", policy__cooldown_seconds=0), transport=services.transport())
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+
+    await run(app, ntfy_line("M1", "first update", title="svc1"))
+    assert run_due_digest(app.store, app.config, now, force=True) == 1
+    await run(app, ntfy_line("M2", "second update", title="svc2"))
+    assert run_due_digest(app.store, app.config, now, force=True) == 1
+
+    rows = app.store.conn.execute("SELECT * FROM outbox WHERE kind = 'digest' ORDER BY id").fetchall()
+    assert len(rows) == 2
+    assert len({row["request_id"] for row in rows}) == 2
+    assert [{ref for group in payload["groups"] for item in group["items"] for ref in item["refs"]} for payload in digests(app)] == [
+        {"M1"},
+        {"M2"},
+    ]
+
+    await app.deliver(rows[0])
+    assert app.store.get_event("ntfy:alerts:M1")["status"] == "digested"
+    assert app.store.get_event("ntfy:alerts:M2")["status"] == "queued_digest"
+    await app.deliver(rows[1])
+    assert app.store.get_event("ntfy:alerts:M2")["status"] == "digested"
+    await app.close()
+
+
+async def test_digest_request_collision_leaves_new_items_pending(make_config, services):
+    services.jev_default = jev_answers(digest=0.9)
+    app = App(make_config(bridge__mode="full", policy__cooldown_seconds=0), transport=services.transport())
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+
+    await run(app, ntfy_line("M1", "first update", title="svc1"))
+    assert run_due_digest(app.store, app.config, now, force=True) == 1
+    [existing] = digests(app)
+    await run(app, ntfy_line("M2", "second update", title="svc2"))
+
+    assert (
+        enqueue_digest(
+            app.store,
+            app.config,
+            digest_id=existing["digest_id"],
+            window_start=existing["window_start"],
+            window_end=existing["window_end"],
+        )
+        == 0
+    )
+    assert app.store.digest_item_for("ntfy:alerts:M2")["digest_id"] is None
+    assert len(digests(app)) == 1
+    await app.close()
+
+
+async def test_dead_digest_remains_recoverable_and_requeues_bound_events(make_config, services):
+    services.jev_default = jev_answers(digest=0.9)
+    services.hermes_status = [404]
+    app = App(make_config(bridge__mode="full"), transport=services.transport())
+
+    await run(app, ntfy_line("M1", "update available", title="svc1"))
+    assert run_due_digest(app.store, app.config, datetime.now(UTC), force=True) == 1
+    [row] = app.store.conn.execute("SELECT * FROM outbox WHERE kind = 'digest'").fetchall()
+    await app.deliver(row)
+
+    dead = app.store.conn.execute("SELECT * FROM outbox WHERE id = ?", (row["id"],)).fetchone()
+    item = app.store.digest_item_for("ntfy:alerts:M1")
+    assert dead["status"] == "dead"
+    assert app.store.get_event("ntfy:alerts:M1")["status"] == "dead_letter"
+    assert item is not None and item["digest_id"] == dead["digest_id"]
+
+    assert app.store.requeue_dead([dead["id"]]) == 1
+    assert app.store.get_event("ntfy:alerts:M1")["status"] == "queued_digest"
+    pending = app.store.conn.execute("SELECT * FROM outbox WHERE id = ?", (dead["id"],)).fetchone()
+    assert pending["status"] == "pending"
+    await app.deliver(pending)
+    assert app.store.get_event("ntfy:alerts:M1")["status"] == "digested"
+    await app.close()
+
+
+async def test_prune_keeps_dead_digest_recovery_for_nonterminal_events(make_config, services):
+    services.jev_default = jev_answers(digest=0.9)
+    app = App(make_config(bridge__mode="full"), transport=services.transport())
+
+    await run(app, ntfy_line("M1", "update available", title="svc1"))
+    assert run_due_digest(app.store, app.config, datetime.now(UTC), force=True) == 1
+    [row] = app.store.conn.execute("SELECT * FROM outbox WHERE kind = 'digest'").fetchall()
+    app.store.conn.execute(
+        "UPDATE outbox SET status = 'dead', updated_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
+        (row["id"],),
+    )
+
+    assert app.store.prune(0) == 0
+    assert app.store.conn.execute("SELECT status FROM outbox WHERE id = ?", (row["id"],)).fetchone()["status"] == "dead"
+    assert app.store.requeue_dead([row["id"]]) == 1
+    assert app.store.get_event("ntfy:alerts:M1")["status"] == "queued_digest"
     await app.close()
 
 

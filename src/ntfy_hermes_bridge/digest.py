@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from .config import Config
@@ -208,12 +209,12 @@ def build_parts(
 
 
 def enqueue_digest(store: Store, config: Config, *, digest_id: str, window_start: str, window_end: str) -> int:
-    """Turn every pending digest item into signed-outbox parts. Returns the number of parts."""
+    """Turn every pending digest item into signed-outbox parts. Returns the number inserted."""
     rows = store.pending_digest_items()
     if not rows:
         return 0
     parts = build_parts(rows, config, digest_id=digest_id, window_start=window_start, window_end=window_end)
-    store.commit_digest(
+    return store.commit_digest(
         [
             (
                 OutboxInsert(
@@ -224,7 +225,6 @@ def enqueue_digest(store: Store, config: Config, *, digest_id: str, window_start
             for p, ids in parts
         ]
     )
-    return len(parts)
 
 
 def run_due_digest(store: Store, config: Config, now: datetime, *, force: bool = False) -> int:
@@ -241,7 +241,7 @@ def run_due_digest(store: Store, config: Config, now: datetime, *, force: bool =
     if not force and datetime.fromisoformat(last) >= slot:
         return 0
     window_start = store.get_meta(META_LAST_WINDOW_END) or (last or slot_iso)
-    digest_id = "digest-" + slot.astimezone(tz).strftime("%Y%m%dT%H%M%S")
+    digest_id = "digest-" + slot.astimezone(tz).strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex
     parts = enqueue_digest(store, config, digest_id=digest_id, window_start=window_start, window_end=slot_iso)
     if not force:
         store.set_meta(META_LAST_SLOT, slot_iso)

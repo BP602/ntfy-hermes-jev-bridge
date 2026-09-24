@@ -25,6 +25,7 @@ from .store import AmbiguousRef, Store
 
 ROUTES = [r.value for r in Route]
 SEVERITY = {Route.DROP: 0, Route.DIGEST: 1, Route.REVIEW: 2, Route.NOTIFY_NOW: 3}
+CRITICAL_SAFE_ROUTES = frozenset((Route.NOTIFY_NOW, Route.REVIEW))
 
 
 # ---- helpers ------------------------------------------------------------------------------------
@@ -257,7 +258,12 @@ async def _evaluate(config: Config, args) -> int:
         regressions = [
             (label, base, cand)
             for label, base, cand in results
-            if base.proposed == label["route"] and cand.proposed != label["route"]
+            if (base.proposed == label["route"] and cand.proposed != label["route"])
+            or (
+                label["critical"]
+                and base.proposed in CRITICAL_SAFE_ROUTES
+                and cand.proposed not in CRITICAL_SAFE_ROUTES
+            )
         ]
         fixes = sum(
             1 for label, base, cand in results if base.proposed != label["route"] and cand.proposed == label["route"]
@@ -281,7 +287,7 @@ def _report(title: str, config: Config, pairs: list[tuple[sqlite3.Row, Decision]
     correct = sum(1 for label, d in pairs if d.proposed == label["route"])
     confusion: Counter = Counter((label["route"], str(d.proposed)) for label, d in pairs)
     critical = [(label, d) for label, d in pairs if label["critical"]]
-    crit_safe = sum(1 for _, d in critical if d.proposed in (Route.NOTIFY_NOW, Route.REVIEW))
+    crit_safe = sum(1 for _, d in critical if d.proposed in CRITICAL_SAFE_ROUTES)
     crit_dropped = sum(1 for _, d in critical if d.proposed is Route.DROP)
     notify = [(label, d) for label, d in pairs if d.proposed is Route.NOTIFY_NOW]
     notify_useful = sum(1 for label, _ in notify if label["route"] == Route.NOTIFY_NOW)

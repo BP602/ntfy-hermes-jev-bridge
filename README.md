@@ -31,6 +31,29 @@ If ntfy or Hermes use a self-signed HTTPS certificate, save it as PEM and set `n
 
 Give ntfy a persistent cache (`cache-file`). Its default in-memory cache does not survive a restart, and the bridge can only replay what ntfy still holds.
 
+## Container image
+
+Every successful push to `main` publishes `ghcr.io/bp602/ntfy-hermes-jev-bridge:main` and an immutable `sha-<40-character-commit>` tag. Release commits also publish `v<version>` and `latest`. PRs run checks without pushing images. The image runs as UID 10001, writes SQLite under `/data`, and reads `/config/config.toml`; no local config, `.env`, or PEM is included in the image.
+
+```sh
+mkdir -p bridge-data
+chmod 700 bridge-data
+# In your container config, set bridge.database = "bridge.db" and bridge.env_file = "".
+# Set health.listen = "0.0.0.0:9464" only if you need to reach /healthz from the host;
+# keep any published port bound to loopback.
+podman run --rm --name ntfy-bridge \
+  --env-file .env \
+  -v "$PWD/config.toml:/config/config.toml:ro" \
+  -v "$PWD/bridge-data:/data" \
+  ghcr.io/bp602/ntfy-hermes-jev-bridge:main
+```
+
+The process must be able to read the mounted config and CA file and write `/data` as UID 10001 (rootless Podman may require `:U` or a matching host UID). Container DNS/network access to ntfy, Hermes and TypeSafe must match your configured endpoints. The container health check calls `127.0.0.1:9464/healthz` inside the container. Logs go to stderr: `bridge.log_format = "auto"` selects JSON lines without a TTY and readable `key=value` text in a terminal; force `"json"` or `"text"` as needed. Log records include the event/topic/route or retry context without raw notification bodies.
+
+## Releases
+
+`pyproject.toml` is the version source; the installed package and `/healthz` report its version plus the image's build commit. Use Conventional Commit subjects (`feat:`, `fix:`, `feat!:`) on `main`. Release Please opens a release PR with the version bump, matching `uv.lock` version, and `CHANGELOG.md`; merge it to create the GitHub release and tag. The same workflow publishes the release image because GitHub's `GITHUB_TOKEN`-created tag does not start another workflow run. To run CI on bot-created release PRs, configure a `RELEASE_PLEASE_TOKEN` secret with a token allowed to create PRs (otherwise manually dispatch CI on that branch); enable **Allow GitHub Actions to create and approve pull requests** in repository Actions settings.
+
 ## Rollout modes (`bridge.mode`)
 
 | Mode | Behavior |

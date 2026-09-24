@@ -16,10 +16,12 @@ from pathlib import Path
 
 import httpx
 
+from . import BUILD
 from .config import Config, ConfigError, TopicSettings, load_config, secret, tls_context
 from .digest import run_due_digest
 from .hermes import HermesClient, fallback_ntfy_payload, publish_ntfy
 from .jev import JevClient
+from .logs import setup_logging
 from .metrics import Metrics
 from .models import INTERNAL_EVENT_PREFIX, iso_from_unix, now_iso
 from .normalize import MESSAGE_ID_RE
@@ -31,6 +33,8 @@ log = logging.getLogger(__name__)
 GUARDRAIL_REFRESH_SECONDS = 600
 RELOAD_POLL_SECONDS = 5
 PRUNE_INTERVAL_SECONDS = 86_400
+MIN_UNIX_TIMESTAMP = -62_135_596_800
+MAX_UNIX_TIMESTAMP = 253_402_300_799
 
 
 class DestinationDenied(httpx.TransportError):
@@ -103,15 +107,18 @@ class App:
     async def run(self) -> None:
         reset = self.store.reset_processing()
         if reset:
-            log.info("resuming %d events interrupted mid-processing", reset)
+            log.info("resuming events interrupted mid-processing", extra={"count": reset})
         await self.refresh_guardrail()
         log.info(
-            "bridge starting: mode=%s policy=%s (%s) jev=%s topics=%s",
-            self.config.bridge.mode,
-            self.config.policy.version,
-            self.ctx.policy_hash,
-            self.config.typesafe.model if self.config.typesafe.enabled else "disabled (local-only)",
-            ",".join(self.connected),
+            "bridge starting",
+            extra={
+                "version": BUILD,
+                "mode": self.config.bridge.mode,
+                "policy_version": self.config.policy.version,
+                "policy_hash": self.ctx.policy_hash,
+                "jev_model": self.config.typesafe.model if self.config.typesafe.enabled else None,
+                "topics": list(self.connected),
+            },
         )
         async with asyncio.TaskGroup() as tg:
             for topic in self.config.ntfy.topics:
@@ -135,7 +142,7 @@ class App:
                 await self.stream_once(topic)
                 backoff = 1.0
             except (httpx.HTTPError, ConnectionError) as exc:
-                log.warning("ntfy %s stream error: %s", topic.name, exc)
+                log.warning("ntfy stream error", extra={"topic": topic.name, "error": str(exc) or type(exc).__name__})
             self._set_connected(topic.name, False)
             await asyncio.sleep(backoff * random.uniform(0.8, 1.2))
             backoff = min(backoff * 2, self.config.ntfy.reconnect_max_seconds)
@@ -156,9 +163,9 @@ class App:
                 raise httpx.HTTPStatusError(f"HTTP {response.status_code}", request=response.request, response=response)
             if response.headers.get("x-messages-truncated") == "1":
                 self.metrics.inc("ntfy_truncated_replays_total", topic=topic.name)
-                log.error("ntfy %s replay was truncated by the server; older cached messages were lost", topic.name)
+                log.error("ntfy replay truncated; older cached messages were lost", extra={"topic": topic.name})
             self._set_connected(topic.name, True)
-            log.info("ntfy %s connected (since=%s)", topic.name, params.get("since", "now"))
+            log.info("ntfy connected", extra={"topic": topic.name, "since": params.get("since", "now")})
             async for line in response.aiter_lines():
                 if line.strip():
                     self.ingest_line(topic.name, line)
@@ -183,7 +190,11 @@ class App:
             return
         received = now_iso()
         stamp = msg.get("time")
-        valid_time = isinstance(stamp, (int, float)) and not isinstance(stamp, bool)
+        valid_time = (
+            isinstance(stamp, (int, float))
+            and not isinstance(stamp, bool)
+            and MIN_UNIX_TIMESTAMP <= stamp <= MAX_UNIX_TIMESTAMP
+        )
         inserted = self.store.ingest(
             topic=topic,
             message_id=mid,
@@ -225,16 +236,21 @@ class App:
             decision = await self.pipeline.process(row)
         except Exception as exc:  # keep the pipeline alive; the event stays in the inbox
             status = self.store.release_failed(row["event_id"], f"{type(exc).__name__}: {exc}")
-            log.exception("processing %s failed (event now %s)", row["event_id"], status)
+            log.exception("event processing failed", extra={"event_id": row["event_id"], "status": status})
             return
         if decision is not None:
             log.info(
-                "decided %s source=%s proposed=%s effective=%s rule=%s",
-                decision.event.event_id,
-                decision.event.source,
-                decision.proposed,
-                decision.effective,
-                decision.rule or "-",
+                "event decided",
+                extra={
+                    "event_id": decision.event.event_id,
+                    "source": decision.event.source,
+                    "event_kind": decision.event.event_kind,
+                    "proposed": str(decision.proposed),
+                    "effective": str(decision.effective),
+                    "rule": decision.rule,
+                    "jev_model": decision.jev.model if decision.jev else None,
+                    "jev_error": decision.jev_error,
+                },
             )
             if decision.effective in ("NOTIFY_NOW", "REVIEW"):
                 self.outbox_wake.set()
@@ -243,7 +259,7 @@ class App:
         ctx = self.ctx
         ctx.guardrail = await self.pipeline.compute_guardrail(ctx)
         if ctx.config.bridge.mode == "full":
-            log.info("DROP guardrail %s", ctx.guardrail.describe())
+            log.info("drop guardrail", extra={"ok": ctx.guardrail.ok, "detail": ctx.guardrail.describe()})
 
     # ---- delivery ---------------------------------------------------------------------------
 
@@ -286,12 +302,21 @@ class App:
         if outcome.ok:
             self.store.outbox_delivered(row)
             self.metrics.inc("deliveries_total", kind=kind, outcome="delivered")
-            log.info("delivered outbox #%d %s %s", row["id"], kind, row["request_id"])
+            log.info("delivered", extra={"outbox_id": row["id"], "kind": kind, "request_id": row["request_id"]})
             return
         if not outcome.retryable or attempts >= config.outbox.max_attempts:
             self.store.outbox_dead(row, error=outcome.detail)
             self.metrics.inc("deliveries_total", kind=kind, outcome="dead")
-            log.error("outbox #%d %s dead-lettered after %d attempts: %s", row["id"], kind, attempts, outcome.detail)
+            log.error(
+                "delivery dead-lettered",
+                extra={
+                    "outbox_id": row["id"],
+                    "kind": kind,
+                    "request_id": row["request_id"],
+                    "attempts": attempts,
+                    "error": outcome.detail,
+                },
+            )
         else:
             delay = min(config.outbox.max_backoff_seconds, config.outbox.base_backoff_seconds * 2 ** (attempts - 1))
             due = (datetime.now(UTC) + timedelta(seconds=delay * random.uniform(0.8, 1.2))).isoformat(
@@ -299,7 +324,17 @@ class App:
             )
             self.store.outbox_retry(row["id"], error=outcome.detail, next_attempt_at=due)
             self.metrics.inc("deliveries_total", kind=kind, outcome="retry")
-            log.warning("outbox #%d %s attempt %d failed: %s", row["id"], kind, attempts, outcome.detail)
+            log.warning(
+                "delivery failed; will retry",
+                extra={
+                    "outbox_id": row["id"],
+                    "kind": kind,
+                    "request_id": row["request_id"],
+                    "attempts": attempts,
+                    "next_attempt_at": due,
+                    "error": outcome.detail,
+                },
+            )
         if (
             kind == "compose"
             and row["critical"]
@@ -319,7 +354,10 @@ class App:
             critical=True,
         )
         if self.store.enqueue(item, event_id=row["event_id"]):
-            log.warning("Hermes unavailable for critical %s; queued clean-ntfy fallback", row["request_id"])
+            log.warning(
+                "Hermes unavailable for critical event; queued clean-ntfy fallback",
+                extra={"request_id": row["request_id"]},
+            )
             self.outbox_wake.set()
 
     # ---- digests ----------------------------------------------------------------------------
@@ -329,7 +367,7 @@ class App:
             parts = run_due_digest(self.store, self.config, datetime.now(UTC))
             if parts:
                 self.metrics.inc("digests_total", parts)
-                log.info("enqueued digest in %d part(s)", parts)
+                log.info("digest enqueued", extra={"parts": parts})
                 self.outbox_wake.set()
             await asyncio.sleep(30)
 
@@ -344,6 +382,7 @@ class App:
         status = "ok" if not ingest_down and not delivery_down and not counts["outbox_dead"] else "degraded"
         return {
             "status": status,
+            "version": BUILD,
             "mode": self.config.bridge.mode,
             "policy_version": self.config.policy.version,
             "policy_hash": self.ctx.policy_hash,
@@ -406,7 +445,7 @@ class App:
             advance_cursor=False,
             event_id=f"{INTERNAL_EVENT_PREFIX}{kind}:{mid}",
         )
-        log.error("bridge health alert: %s", message)
+        log.error("bridge health alert", extra={"alert": kind, "detail": message})
         self.wake.set()
 
     async def serve_http(self) -> None:
@@ -441,7 +480,7 @@ class App:
                 writer.close()
 
         server = await asyncio.start_server(handle, host, int(port))
-        log.info("health/metrics listening on http://%s:%s", host, port)
+        log.info("health/metrics listening", extra={"url": f"http://{host}:{port}"})
         async with server:
             await server.serve_forever()
 
@@ -456,7 +495,7 @@ class App:
                 pruned = self.store.prune(self.config.retention.days)
                 last_prune = time.monotonic()
                 if pruned:
-                    log.info("pruned %d events past %d-day retention", pruned, self.config.retention.days)
+                    log.info("retention prune", extra={"events": pruned, "days": self.config.retention.days})
 
     async def reload_loop(self) -> None:
         while True:
@@ -475,27 +514,50 @@ class App:
             candidate = await asyncio.to_thread(load_config, self.config_path)
         except ConfigError as exc:
             self.metrics.inc("config_reloads_total", outcome="invalid")
-            log.error("config reload rejected; keeping policy %s: %s", self.config.policy.version, exc)
+            log.error(
+                "config reload rejected: invalid",
+                extra={"keeping_policy": self.config.policy.version, "error": str(exc)},
+            )
             return False
         if candidate.restart_scope() != self.config.restart_scope():
             self.metrics.inc("config_reloads_total", outcome="restart_required")
-            log.error("config reload rejected: ntfy/network/database/secret/endpoint changes require a restart")
+            log.error(
+                "config reload rejected: ntfy/network/database/secret/endpoint changes require a restart",
+                extra={"keeping_policy": self.config.policy.version},
+            )
+            return False
+        if candidate.bridge.mode != "shadow" and not self.hermes.secret:
+            error = (
+                f"mode {candidate.bridge.mode!r} requires "
+                f"${candidate.hermes.secret_env} for signed Hermes delivery"
+            )
+            self.metrics.inc("config_reloads_total", outcome="invalid")
+            log.error(
+                "config reload rejected: invalid",
+                extra={"keeping_policy": self.config.policy.version, "error": error},
+            )
             return False
         ctx = Context.build(candidate)
         ctx.guardrail = await self.pipeline.compute_guardrail(ctx)
+        previous = self.config.bridge
         self.pipeline.ctx = ctx
+        if (candidate.bridge.log_level, candidate.bridge.log_format) != (previous.log_level, previous.log_format):
+            setup_logging(candidate.bridge.log_level, candidate.bridge.log_format)
         self.metrics.inc("config_reloads_total", outcome="applied")
         log.info(
-            "config reloaded: mode=%s policy=%s (%s)", candidate.bridge.mode, candidate.policy.version, ctx.policy_hash
+            "config reloaded",
+            extra={
+                "mode": candidate.bridge.mode,
+                "policy_version": candidate.policy.version,
+                "policy_hash": ctx.policy_hash,
+            },
         )
         return True
 
 
 def run(config_path: Path) -> int:
     config = load_config(config_path)
-    logging.basicConfig(level=config.bridge.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    # httpx logs full request URLs at INFO; keep them out of the bridge log.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    setup_logging(config.bridge.log_level, config.bridge.log_format)
 
     async def main() -> None:
         app = App(config, config_path=config_path)
