@@ -209,22 +209,24 @@ def build_parts(
 
 
 def enqueue_digest(store: Store, config: Config, *, digest_id: str, window_start: str, window_end: str) -> int:
-    """Turn every pending digest item into signed-outbox parts. Returns the number inserted."""
+    """Partition pending work by Hermes profile before composing and enqueueing each digest."""
     rows = store.pending_digest_items()
-    if not rows:
-        return 0
-    parts = build_parts(rows, config, digest_id=digest_id, window_start=window_start, window_end=window_end)
-    return store.commit_digest(
-        [
-            (
-                OutboxInsert(
-                    "digest", request_id=f"{digest_id}#p{p['part']}", payload=p, digest_id=f"{digest_id}#p{p['part']}"
-                ),
-                ids,
-            )
-            for p, ids in parts
-        ]
-    )
+    by_profile: dict[str, list] = {}
+    for row in rows:
+        source = json.loads(row["canonical_json"])["source"]
+        by_profile.setdefault(config.hermes.profile_for_source(source), []).append(row)
+
+    outbox = []
+    for profile, profile_rows in by_profile.items():
+        target_id = digest_id if profile == "default" else f"{digest_id}@{profile}"
+        for payload, ids in build_parts(
+            profile_rows, config, digest_id=target_id, window_start=window_start, window_end=window_end
+        ):
+            if profile != "default":
+                payload["profile"] = profile
+            part_id = f"{target_id}#p{payload['part']}"
+            outbox.append((OutboxInsert("digest", request_id=part_id, payload=payload, digest_id=part_id), ids))
+    return store.commit_digest(outbox) if outbox else 0
 
 
 def run_due_digest(store: Store, config: Config, now: datetime, *, force: bool = False) -> int:

@@ -93,7 +93,7 @@ class FakeServices:
             self.jev_requests.append(json.loads(request.content))
             item = self.jev.pop(0) if self.jev else self.jev_default
             return item if isinstance(item, httpx.Response) else httpx.Response(200, json=item)
-        if request.url.path.startswith("/webhooks/"):
+        if "/webhooks/" in request.url.path:
             self.hermes_requests.append(request)
             status = self.hermes_status.pop(0) if self.hermes_status else 202
             return httpx.Response(status, json={"status": "accepted"})

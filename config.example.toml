@@ -41,6 +41,7 @@ secret_env = "HERMES_WEBHOOK_SECRET"
 compose_route = "notification-compose"
 review_route = "notification-review"
 digest_route = "notification-digest"
+# source_profiles = { arr = "torry", "cross-seed" = "torry" } # optional: source names, not ntfy topic aliases
 
 [outbox]
 max_attempts = 8

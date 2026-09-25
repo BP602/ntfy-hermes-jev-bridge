@@ -106,11 +106,27 @@ class TypeSafeSettings(_Model):
 class HermesSettings(_Model):
     base_url: str = "http://127.0.0.1:8644"
     secret_env: str = "HERMES_WEBHOOK_SECRET"
-    compose_route: str = "notification-compose"
-    review_route: str = "notification-review"
-    digest_route: str = "notification-digest"
+    compose_route: str = Field(default="notification-compose", pattern=TOPIC_PATTERN)
+    review_route: str = Field(default="notification-review", pattern=TOPIC_PATTERN)
+    digest_route: str = Field(default="notification-digest", pattern=TOPIC_PATTERN)
+    source_profiles: dict[str, str] = {}
     timeout_seconds: float = Field(default=15, gt=0)
     max_body_bytes: int = Field(default=1_000_000, ge=16_384)
+
+    @field_validator("source_profiles")
+    @classmethod
+    def _source_profiles(cls, value: dict[str, str]) -> dict[str, str]:
+        if any(not re.fullmatch(TOPIC_PATTERN, source) or not re.fullmatch(TOPIC_PATTERN, profile)
+               for source, profile in value.items()):
+            raise ValueError("source_profiles requires source and profile names containing only letters, digits, - or _")
+        return value
+
+    def profile_for_source(self, source: str) -> str:
+        return self.source_profiles.get(source, "default")
+
+    def route_for(self, kind: str, profile: str) -> str:
+        name = {"compose": self.compose_route, "review": self.review_route, "digest": self.digest_route}[kind]
+        return name if profile == "default" else f"{name}-{profile}"
 
 
 class OutboxSettings(_Model):
@@ -302,6 +318,7 @@ class Config(_Model):
     def policy_hash(self) -> str:
         material = {
             "policy": self.policy.model_dump(mode="json"),
+            "source_profiles": self.hermes.source_profiles,
             "sources": {k: v.model_dump(mode="json") for k, v in sorted(self.sources.items())},
             "typesafe_enabled": self.typesafe.enabled,
             "model": self.typesafe.model,

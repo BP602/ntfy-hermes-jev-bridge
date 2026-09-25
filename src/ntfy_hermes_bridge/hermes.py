@@ -45,7 +45,7 @@ class HermesClient:
         self.secret = secret.encode()
 
     async def post(
-        self, base_url: str, route: str, payload: dict, *, request_id: str, timeout: float
+        self, base_url: str, route: str, payload: dict, *, request_id: str, timeout: float, profile: str = "default"
     ) -> DeliveryOutcome:
         body = encode(payload)
         timestamp = int(time.time())
@@ -55,7 +55,8 @@ class HermesClient:
             "X-Webhook-Signature-V2": sign_v2(self.secret, timestamp, body),
             "X-Request-ID": request_id,
         }
-        url = f"{base_url.rstrip('/')}/webhooks/{route}"
+        prefix = f"/p/{profile}" if profile != "default" else ""
+        url = f"{base_url.rstrip('/')}{prefix}/webhooks/{route}"
         try:
             response = await self.http.post(url, content=body, headers=headers, timeout=timeout)
         except httpx.TransportError as exc:

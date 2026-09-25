@@ -50,6 +50,41 @@ async def test_digest_collapses_duplicates_and_resolved_flaps(make_config, servi
     await app.close()
 
 
+async def test_digest_partitions_media_and_change_between_profiles(make_config, services):
+    services.jev_default = jev_answers(digest=0.9)
+    app = App(
+        make_config(
+            bridge__mode="guarded",
+            ntfy__topics=[{"name": name} for name in ("arr", "cross-seed", "change")],
+            hermes__source_profiles={"arr": "torry", "cross-seed": "torry"},
+        ),
+        transport=services.transport(),
+    )
+    for topic, mid in (("arr", "A1"), ("cross-seed", "C1"), ("change", "I1")):
+        app.ingest_line(topic, ntfy_line(mid, "routine change", topic=topic))
+    for row in app.store.claim_received(3):
+        await app.pipeline.process(row)
+
+    assert run_due_digest(app.store, app.config, datetime.now(UTC), force=True) == 2
+    rows = app.store.conn.execute("SELECT * FROM outbox WHERE kind = 'digest' ORDER BY id").fetchall()
+    assert len({row["request_id"] for row in rows}) == 2
+    payloads = [json.loads(row["payload_json"]) for row in rows]
+    assert {
+        payload.get("profile", "default"): {group["source"] for group in payload["groups"]}
+        for payload in payloads
+    } == {"torry": {"arr", "cross-seed"}, "default": {"change"}}
+
+    for row in rows:
+        await app.deliver(row)
+    assert {req.url.path for req in services.hermes_requests} == {
+        "/p/torry/webhooks/notification-digest-torry",
+        "/webhooks/notification-digest",
+    }
+    assert {app.store.get_event(f"ntfy:{topic}:{mid}")["status"] for topic, mid in
+            (("arr", "A1"), ("cross-seed", "C1"), ("change", "I1"))} == {"digested"}
+    await app.close()
+
+
 async def test_large_digest_is_split_under_body_limit(make_config, services):
     services.jev_default = jev_answers(digest=0.9)
     config = make_config(bridge__mode="full", hermes__max_body_bytes=16_384, digest__item_excerpt_chars=280)

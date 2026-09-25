@@ -313,17 +313,19 @@ class App:
                 self.http, config.ntfy.base_url, self.ntfy_token, payload, timeout=config.hermes.timeout_seconds
             )
         else:
-            route = {
-                "compose": config.hermes.compose_route,
-                "review": config.hermes.review_route,
-                "digest": config.hermes.digest_route,
-            }[kind]
+            profile = (
+                payload.get("profile", "default")
+                if kind == "digest"
+                else config.hermes.profile_for_source(payload["source"])
+            )
+            route = config.hermes.route_for(kind, profile)
             outcome = await self.hermes.post(
                 config.hermes.base_url,
                 route,
                 payload,
                 request_id=row["request_id"],
                 timeout=config.hermes.timeout_seconds,
+                profile=profile,
             )
         attempts = row["attempts"] + 1
         if outcome.ok:

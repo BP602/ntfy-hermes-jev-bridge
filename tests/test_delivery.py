@@ -43,6 +43,35 @@ async def test_hermes_requests_are_signed_v2_and_idempotent(make_config, service
     await app.close()
 
 
+async def test_source_profiles_route_reviews_and_critical_alerts_to_distinct_agents(make_config, services):
+    app = App(
+        make_config(
+            bridge__mode="guarded",
+            ntfy__topics=[{"name": name} for name in ("arr", "cross-seed", "change")],
+            hermes__source_profiles={"arr": "torry", "cross-seed": "torry"},
+        ),
+        transport=services.transport(),
+    )
+    for topic, mid in (("arr", "A1"), ("cross-seed", "C1"), ("change", "I1")):
+        app.ingest_line(topic, ntfy_line(mid, "routine change", topic=topic))
+    app.ingest_line("arr", ntfy_line("A2", "zpool tank DEGRADED", topic="arr"))
+    for row in app.store.claim_received(4):
+        await app.pipeline.process(row)
+    for row in outbox(app):
+        await app.deliver(row)
+
+    assert {
+        (json.loads(req.content)["source"], json.loads(req.content)["event_type"], req.url.path)
+        for req in services.hermes_requests
+    } == {
+        ("arr", "notification.review", "/p/torry/webhooks/notification-review-torry"),
+        ("arr", "notification.compose", "/p/torry/webhooks/notification-compose-torry"),
+        ("cross-seed", "notification.review", "/p/torry/webhooks/notification-review-torry"),
+        ("change", "notification.review", "/webhooks/notification-review"),
+    }
+    await app.close()
+
+
 async def test_transient_failures_retry_then_deliver(make_config, services):
     services.hermes_status = [503]
     app = App(make_config(bridge__mode="guarded"), transport=services.transport())
