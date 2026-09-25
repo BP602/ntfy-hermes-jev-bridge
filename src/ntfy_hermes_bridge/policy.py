@@ -37,6 +37,25 @@ BUILTIN_SIGNATURES: tuple[tuple[str, str], ...] = (
     ),
 )
 
+PRICE_DIFF_LINE = re.compile(r"^\((changed|into)\)\s*(.*)$", re.IGNORECASE)
+PRICE_VALUE = re.compile(r"^(?:[€£$]\s*\d|(?:regular|sale|unit|price)\b)", re.IGNORECASE)
+
+
+def _price_only_change(event: CanonicalEvent) -> bool:
+    """Drop only diffs whose marked changes are exclusively price fields; additions survive."""
+    if event.event_kind != "price_changed":
+        return False
+    changed = False
+    for raw_line in event.message.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("("):
+            continue
+        match = PRICE_DIFF_LINE.fullmatch(line)
+        if not match or not PRICE_VALUE.match(match[2]):
+            return False
+        changed |= match[1].lower() == "changed"
+    return changed
+
 
 @dataclass(frozen=True, slots=True)
 class DeterministicMatch:
@@ -58,6 +77,9 @@ class DeterministicPolicy:
         self.echo_tags = frozenset(t.lower() for t in policy.echo_tags)
         self.test_tags = frozenset(t.lower() for t in policy.test_tags)
         self.drop_fingerprints = frozenset(policy.always_drop.fingerprints)
+        self.price_only_sources = frozenset(
+            source for source, settings in config.sources.items() if settings.ignore_price_only
+        )
         notify = policy.always_notify
         self.rules = notify.rules
         self.urgent_sources = frozenset(notify.urgent_priority_sources)
@@ -80,6 +102,8 @@ class DeterministicPolicy:
             return DeterministicMatch(Route.DROP, "test_event", f"explicit test tag {sorted(test)[0]!r}")
         if event.fingerprint in self.drop_fingerprints:
             return DeterministicMatch(Route.DROP, "approved_fingerprint", "exact user-approved drop fingerprint")
+        if event.source in self.price_only_sources and _price_only_change(event):
+            return DeterministicMatch(Route.DROP, "price_only_change", "source-opted price-only diff")
 
         if event.internal:
             return DeterministicMatch(Route.NOTIFY_NOW, "bridge_health", "bridge health failure")

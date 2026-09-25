@@ -99,6 +99,7 @@ patterns = []
 # Per-source overrides (FR-15)
 # [sources.changedetection]
 # local_only = false
+# ignore_price_only = true  # opt-in: drop price-only ChangeDetection diffs; additions are retained
 # thresholds = { digest_value = 0.70 }
 
 [health]

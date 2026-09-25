@@ -267,6 +267,7 @@ class PolicySettings(_Model):
 
 class SourcePolicy(_Model):
     local_only: bool = False
+    ignore_price_only: bool = False
     fallback_route: FallbackRoute | None = None
     thresholds: ThresholdOverrides = ThresholdOverrides()
 

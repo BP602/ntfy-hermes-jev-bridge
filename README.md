@@ -67,14 +67,14 @@ The process must be able to read the mounted config and CA file and write `/data
 | Mode | Behavior |
 |---|---|
 | `shadow` | Classifies and records the proposed route for every event. Sends nothing, suppresses nothing, queues no digests. |
-| `guarded` | Deterministic Always Notify delivers through Hermes compose. When Jev proposes `NOTIFY_NOW`, the event goes to Hermes review instead. When Jev proposes `DROP`, the event goes to the digest. Only exact user-approved drop rules drop. |
+| `guarded` | Deterministic Always Notify delivers through Hermes compose. When Jev proposes `NOTIFY_NOW`, the event goes to Hermes review instead. When Jev proposes `DROP`, the event goes to the digest. Only exact user-approved drop rules and explicitly enabled source price-only filtering drop. |
 | `full` | All routes are active. Jev-proposed `DROP` is honored only while the DROP guardrail passes: at least `min_labels_for_drop` labeled events, at least `min_critical_labels_for_drop` critical labels, and no critical label replaying to `DROP`. Otherwise the event goes to the digest. |
 
 `mode` hot-reloads, so you can promote with a config edit.
 
 ## Routing
 
-1. **Always drop** (checked first): echo tags (`policy.echo_tags`), explicit test tags, or exact fingerprints listed in `policy.always_drop.fingerprints`. Keyword matches never drop anything. An event ID that is already in the inbox is never processed a second time.
+1. **Always drop** (checked first): echo tags (`policy.echo_tags`), explicit test tags, exact fingerprints listed in `policy.always_drop.fingerprints`, or price-only diffs for sources opting into `ignore_price_only`. An event ID already in the inbox is never processed twice. Price-only detection requires every marked `(changed)`/`(into)` line to be a price field; any `(added)`/`(removed)` line or other changed field is retained.
 2. **Always notify**: bridge health alerts; `always_notify.rules` allowlist matches; ntfy priority 5 from `urgent_priority_sources`; built-in or custom signatures (backup failure, pool degradation, corruption, intrusion, UPS/power). Built-in signatures skip `signature_exempt_sources`, which by default covers ChangeDetection because watched pages are third-party text.
 3. **Jev** (when enabled for the source): one request per event carries 6 questions (see `questions.py`, version `ops-notification-v1`). The response must include every answer, a complete probability distribution whose highest option matches the chosen category, and the requested pinned model (unless `allow_model_alias = true`). Invalid responses take the non-dropping fallback route. The thresholds are applied in `policy.route_from_answers`, and per-source overrides come from `[sources.<name>].thresholds`; unknown category names are rejected at config load.
 4. **Fallback**: if Jev is disabled for a source (local-only), or it errors, times out, is rate-limited past the retry budget, returns an invalid response, or is blocked by the redaction guard, the event gets `fallback_route`. With `auto`, priority ≥ 4 goes to `REVIEW` and everything else to `DIGEST`. Fallback never drops.
@@ -83,6 +83,8 @@ The process must be able to read the mounted config and CA file and write `/data
 `REVIEW` events are also placed in the digest queue, regardless of the webhook agent's response.
 
 `repeat_bucket` (`first`/`repeated`/`flapping`) and `recency_bucket` (`fresh`/`stale`) are computed in code and sent to Jev as buckets. Jev never counts or compares dates.
+
+For a ChangeDetection source dedicated to IEM watch notifications, set `[sources.changedetection] ignore_price_only = true` (JSON: `"sources":{"changedetection":{"ignore_price_only":true}}`) and bump `policy.version`. This suppresses the observed currency-price churn before Jev and the digest; it does **not** establish that a retained page change is a new IEM release. Configure the watch to report stable product additions with titles/URLs before promoting any release to an immediate alert.
 
 ## TypeSafe data boundary
 

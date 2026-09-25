@@ -261,6 +261,45 @@ async def test_approved_fingerprints_drop_only_exact_matches(make_config, servic
     await app.close()
 
 
+async def test_opted_in_price_only_change_is_dropped_without_hiding_product_addition(make_config, services):
+    app = App(
+        make_config(
+            bridge__mode="guarded",
+            ntfy__topics=[{"name": "change", "source": "changedetection", "normalizer": "changedetection"}],
+            sources__changedetection={"ignore_price_only": True},
+        ),
+        transport=services.transport(),
+    )
+    title = "ChangeDetection - https://thehificat.com/collections/new-available"
+    app.ingest_line(
+        "change",
+        ntfy_line(
+            "P1",
+            "S.M.S.L R100 audio DAC\n(changed) Regular price €266,95 EUR\n"
+            "(changed) Regular price Sale price €266,95 EUR\n(changed) Unit price / per",
+            title=title,
+            topic="change",
+        ),
+    )
+    app.ingest_line(
+        "change",
+        ntfy_line(
+            "N1",
+            "New IEM collection\n(added) Brand New IEM X\n(changed) Regular price €199,95 EUR",
+            title=title,
+            topic="change",
+        ),
+    )
+    price, addition = [await app.pipeline.process(row) for row in app.store.claim_received(2)]
+
+    assert price.rule == "price_only_change" and price.effective == Route.DROP
+    assert app.store.digest_item_for("ntfy:change:P1") is None
+    assert addition.rule is None and addition.effective != Route.DROP
+    assert app.store.digest_item_for("ntfy:change:N1") is not None
+    assert len(services.jev_requests) == 1
+    await app.close()
+
+
 def answers(category="informational", confidence=0.9, **noul) -> JevAnswers:
     base = {
         "immediate_harm_if_ignored": 0.1,
