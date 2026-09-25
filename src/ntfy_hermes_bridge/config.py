@@ -164,6 +164,7 @@ def _validate_categories(value: tuple[str, ...]) -> tuple[str, ...]:
 
 class Thresholds(_Model):
     notify_harm: Prob = 0.80
+    review_harm: Prob = 0.40
     notify_category_confidence: Prob = 0.70
     notify_categories: tuple[str, ...] = ("security", "data_integrity")
     drop_routine_noise: Prob = 0.90
@@ -181,6 +182,7 @@ class Thresholds(_Model):
 
 class ThresholdOverrides(_Model):
     notify_harm: Prob | None = None
+    review_harm: Prob | None = None
     notify_category_confidence: Prob | None = None
     notify_categories: tuple[str, ...] | None = None
     drop_routine_noise: Prob | None = None

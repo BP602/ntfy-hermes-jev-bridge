@@ -39,6 +39,7 @@ BUILTIN_SIGNATURES: tuple[tuple[str, str], ...] = (
 
 PRICE_DIFF_LINE = re.compile(r"^\((changed|into)\)\s*(.*)$", re.IGNORECASE)
 PRICE_VALUE = re.compile(r"^(?:[€£$]\s*\d|(?:regular|sale|unit|price)\b)", re.IGNORECASE)
+CRITICAL_REVIEW_CATEGORIES = frozenset({"security", "data_integrity"})
 
 
 def _price_only_change(event: CanonicalEvent) -> bool:
@@ -146,6 +147,8 @@ def route_from_answers(answers: JevAnswers, t: Thresholds) -> tuple[Route, list[
             f"category {answers.category} with confidence {answers.category_confidence:.2f} "
             f">= {t.notify_category_confidence:.2f}"
         ]
+    if answers.category in CRITICAL_REVIEW_CATEGORIES:
+        return Route.REVIEW, [f"uncertain critical category {answers.category}; Hermes adjudicates"]
     if (
         noise >= t.drop_routine_noise
         and harm <= t.drop_max_harm
@@ -157,12 +160,14 @@ def route_from_answers(answers: JevAnswers, t: Thresholds) -> tuple[Route, list[
             f"digest_value {digest:.2f} <= {t.drop_max_digest_value:.2f}, "
             f"personal_relevance {relevance:.2f} <= {t.drop_max_relevance:.2f}"
         ]
+    if harm >= t.review_harm:
+        return Route.REVIEW, [f"immediate_harm_if_ignored {harm:.2f} >= review threshold {t.review_harm:.2f}"]
     if digest >= t.digest_value or relevance >= t.digest_relevance:
         return Route.DIGEST, [
             f"digest_value {digest:.2f} (>= {t.digest_value:.2f}?) or personal_relevance {relevance:.2f} "
             f"(>= {t.digest_relevance:.2f}?)"
         ]
-    return Route.REVIEW, ["no threshold rule matched; Hermes adjudicates"]
+    return Route.DIGEST, ["low immediate harm without a critical category; batch in digest"]
 
 
 def fallback_route(event: CanonicalEvent, setting: str) -> Route:

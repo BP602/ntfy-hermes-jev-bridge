@@ -113,12 +113,37 @@ async def test_shadow_mode_records_without_delivery_or_digest(make_config, servi
 
 
 async def test_review_is_also_queued_for_digest(make_config, services):
-    services.jev_default = jev_answers(digest=0.4, relevance=0.4)
+    services.jev_default = jev_answers(harm=0.5, digest=0.4, relevance=0.4)
     app = App(make_config(bridge__mode="full"), transport=services.transport())
     [decision] = await run(app, ntfy_line("M1", "something odd"))
     assert decision.effective == Route.REVIEW
     assert [row["kind"] for row in outbox(app)] == ["review"]
     assert app.store.digest_item_for("ntfy:alerts:M1") is not None
+    await app.close()
+
+
+async def test_routine_jev_verdict_skips_hermes_while_urgent_uncertainty_still_reaches_review(make_config, services):
+    app = App(make_config(bridge__mode="guarded"), transport=services.transport())
+    services.jev_default = jev_answers(
+        category="routine_success",
+        confidence=0.64,
+        harm=0.10,
+        action=0.61,
+        digest=0.57,
+        noise=0.79,
+        relevance=0.28,
+    )
+    [routine] = await run(app, ntfy_line("M1", "MobLand cross-seed approved", title="Push Approved"))
+    assert routine.proposed == Route.DIGEST and routine.effective == Route.DIGEST
+    assert outbox(app) == []
+    assert app.store.digest_item_for("ntfy:alerts:M1") is not None
+
+    services.jev_default = jev_answers(category="availability", harm=0.55, digest=0.63)
+    [uncertain] = await run(app, ntfy_line("M2", "service degraded without a matching signature"))
+    assert uncertain.proposed == Route.REVIEW and uncertain.effective == Route.REVIEW
+    [review] = outbox(app)
+    await app.deliver(review)
+    assert len(services.hermes_requests) == 1
     await app.close()
 
 
@@ -318,18 +343,43 @@ def answers(category="informational", confidence=0.9, **noul) -> JevAnswers:
         (answers(immediate_harm_if_ignored=0.79), Route.REVIEW),
         (answers("security", 0.70), Route.NOTIFY_NOW),
         (answers("security", 0.69), Route.REVIEW),
-        (answers("availability", 0.99), Route.REVIEW),
+        (answers("availability", 0.99), Route.DIGEST),
         (
             answers(routine_noise=0.90, immediate_harm_if_ignored=0.20, digest_value=0.35, personal_relevance=0.35),
             Route.DROP,
         ),
         (
             answers(routine_noise=0.90, immediate_harm_if_ignored=0.21, digest_value=0.35, personal_relevance=0.35),
-            Route.REVIEW,
+            Route.DIGEST,
         ),
-        (answers(routine_noise=0.95, digest_value=0.36, personal_relevance=0.1), Route.REVIEW),
+        (answers(routine_noise=0.95, digest_value=0.36, personal_relevance=0.1), Route.DIGEST),
         (answers(routine_noise=0.95, digest_value=0.7, personal_relevance=0.1), Route.DIGEST),
         (answers(personal_relevance=0.65), Route.DIGEST),
+        (answers(immediate_harm_if_ignored=0.39), Route.DIGEST),
+        (answers(immediate_harm_if_ignored=0.40), Route.REVIEW),
+        (answers("data_integrity", 0.47, immediate_harm_if_ignored=0.28), Route.REVIEW),
+        (
+            answers(
+                "security",
+                0.42,
+                immediate_harm_if_ignored=0.10,
+                routine_noise=0.98,
+                digest_value=0.10,
+                personal_relevance=0.10,
+            ),
+            Route.REVIEW,
+        ),
+        (
+            answers(
+                "routine_success",
+                0.64,
+                immediate_harm_if_ignored=0.10,
+                routine_noise=0.79,
+                digest_value=0.57,
+                personal_relevance=0.28,
+            ),
+            Route.DIGEST,
+        ),
     ],
 )
 def test_threshold_policy(given, expected):

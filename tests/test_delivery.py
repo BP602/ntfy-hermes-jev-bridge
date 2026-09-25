@@ -10,7 +10,7 @@ import ntfy_hermes_bridge.daemon as daemon_module
 from ntfy_hermes_bridge.daemon import App
 from ntfy_hermes_bridge.models import Route
 
-from .conftest import ntfy_line
+from .conftest import jev_answers, ntfy_line
 
 pytestmark = pytest.mark.anyio
 
@@ -44,6 +44,7 @@ async def test_hermes_requests_are_signed_v2_and_idempotent(make_config, service
 
 
 async def test_source_profiles_route_reviews_and_critical_alerts_to_distinct_agents(make_config, services):
+    services.jev_default = jev_answers(harm=0.5)
     app = App(
         make_config(
             bridge__mode="guarded",

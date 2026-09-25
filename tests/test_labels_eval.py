@@ -112,7 +112,7 @@ async def test_critical_safe_to_unsafe_demotion_is_a_regression_even_when_curren
     current = write_config(tmp_path, config.bridge.database)
     candidate_dir = tmp_path / "candidate"
     candidate_dir.mkdir()
-    candidate = write_config(candidate_dir, config.bridge.database, **{"thresholds": "{ digest_value = 0.3 }"})
+    candidate = write_config(candidate_dir, config.bridge.database, **{"thresholds": "{ review_harm = 0.5 }"})
 
     assert await asyncio.to_thread(main, ["-c", current, "eval", "--candidate", candidate]) == 2
     out = capsys.readouterr().out

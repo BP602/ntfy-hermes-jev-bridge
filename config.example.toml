@@ -68,6 +68,7 @@ min_critical_labels_for_drop = 30
 
 [policy.thresholds]
 notify_harm = 0.80
+review_harm = 0.40             # below this, noncritical uncertain events go to digest, not per-event Hermes review
 notify_category_confidence = 0.70
 notify_categories = ["security", "data_integrity"]
 drop_routine_noise = 0.90
